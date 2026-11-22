@@ -102,7 +102,7 @@ def as_guidance_items(value):
     if isinstance(value, dict):
         return [f'{k}: {to_text(v)}' for k, v in value.items() if to_text(v).strip()][:15]
     if isinstance(value, str):
-        return [x.strip(' -•\\t') for x in re.split(r'\\n+|(?<=;)\\s+', value) if x.strip(' -•\\t')][:15]
+        return [x.strip(' -•\t') for x in re.split(r'\n+|(?<=;)\s+', value) if x.strip(' -•\t')][:15]
     return [to_text(value)] if to_text(value).strip() else []
 
 def format_guidance(record):
