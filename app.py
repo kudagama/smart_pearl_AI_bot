@@ -220,6 +220,14 @@ def package_kind(package):
 def four_g_packages(payload):
     data = knowledge_data(payload)
     sources = []
+    # Dedicated /api/knowledge-hub/4g returns prepaid/postpaid arrays at root.
+    # Keep support for earlier collection-based response shapes.
+    for kind in ('prepaid','postpaid'):
+        for plan in list_of(data.get(kind)):
+            if isinstance(plan, dict):
+                item = dict(plan)
+                item['type'] = kind
+                sources.append(item)
     for key in FOUR_G_COLLECTIONS:
         node = data.get(key)
         if isinstance(node, list):
@@ -264,6 +272,9 @@ def four_g_packages(payload):
             'features':first_value(p,'highlights','features','benefits') or [],
             'tax_included':first_value(p,'taxIncluded','isTaxIncluded'),
         }
+        item['status'] = first_value(p,'status','availability') or 'Not specified'
+        item['category'] = first_value(p,'category') or ''
+        item['source_page'] = first_value(p,'sourcePage')
         key = (item['name'].lower(),kind)
         if key not in seen:
             seen.add(key)
@@ -290,27 +301,50 @@ def trio_packages(payload):
 @app.post('/api/analyze')
 async def analyze(q:Query):
     key,label = classify_intent(q.transcript)
-    # All general 4G queries use full KB collection. No 4G pricing API is
-    # documented; never substitute Trio rates for 4G package prices.
-    path = '/api/knowledge-hub' if key in ('4g','trio_packages') else endpoint(key)
+    # The 4G prices are published from a dedicated Knowledge Hub endpoint.
+    path = '/api/knowledge-hub/4g' if key == '4g' else '/api/knowledge-hub' if key == 'trio_packages' else endpoint(key)
     url = BASE + path
     try:
-        async with httpx.AsyncClient(timeout=20,follow_redirects=False) as client:
-            response = await client.get(url,headers={'Accept':'application/json'})
+        async with httpx.AsyncClient(timeout=20, follow_redirects=False) as client:
+            if key == '4g':
+                # Fetch pricing and recharge fault procedures independently:
+                # either source can still work when the other is unavailable.
+                import asyncio
+                requests = await asyncio.gather(
+                    client.get(BASE + '/api/knowledge-hub/4g', headers={'Accept':'application/json'}),
+                    client.get(BASE + '/api/knowledge-hub', headers={'Accept':'application/json'}),
+                    return_exceptions=True,
+                )
+                pricing_data, rule_data = {}, {}
+                for index, result in enumerate(requests):
+                    if not isinstance(result, Exception) and result.status_code == 200:
+                        try:
+                            response_data = result.json()
+                            if isinstance(response_data, dict) and response_data.get('success') is not False:
+                                if index == 0:
+                                    pricing_data = response_data
+                                else:
+                                    rule_data = response_data
+                        except ValueError:
+                            pass
+                if not pricing_data and not rule_data:
+                    return {'issue':label,'category':key,'source':url,'status':'unavailable',
+                            'packages':[],'four_g':[],'message':'Both Knowledge Hub endpoints are unavailable.'}
+                plans = four_g_packages(pricing_data)
+                rules = four_g_information(rule_data)
+                return {
+                    'issue':label,'category':key,'source':url,
+                    'status':'matched' if (plans or rules) else 'no_match',
+                    'packages':plans,'four_g':rules,
+                    'prepaid_packages':[p for p in plans if p['type']=='prepaid'],
+                    'postpaid_packages':[p for p in plans if p['type']=='postpaid'],
+                    'pricing_available':any(p['price_lkr'] is not None for p in plans),
+                    'message':'4G package tariffs and service guidance from Smart Knowledge Hub.'
+                    if plans else '4G tariff API has not returned packages. Recharge rules may still be available.'
+                }
+            response = await client.get(url, headers={'Accept':'application/json'})
             response.raise_for_status()
             payload = response.json()
-        if key == '4g':
-            items = four_g_information(payload)
-            plans = four_g_packages(payload)
-            return {
-                'issue':label,'category':key,'source':url,
-                'status':'matched' if (items or plans) else 'no_match',
-                'four_g':items,'packages':plans,
-                'prepaid_packages':[p for p in plans if p['type']=='prepaid'],
-                'postpaid_packages':[p for p in plans if p['type']=='postpaid'],
-                'pricing_available':any(p['price_lkr'] is not None for p in plans),
-                'message':'4G service information from Smart Knowledge Hub. Prices are displayed only when supplied by the API.'
-            }
         if key == 'trio_packages':
             items = trio_packages(payload)
             return {'issue':label,'category':key,'source':url,
