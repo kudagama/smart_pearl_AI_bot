@@ -56,8 +56,10 @@ def select_records(payload,key):
         matches=[x for score,x in ranked if score>= (3 if key=='fiber_los' else 1)]
         return matches[:3]
     if isinstance(data,dict):
-        # Never show unrelated telemetry as operational guidance.
-        return [data] if key not in ('fiber_los','slow_internet','tt_routing') else []
+        # Structured operational records only: never render a full API envelope.
+        if key == 'general':
+            return []
+        return [data] if any(k in data for k in ('rule_code','rule_name','advice_instructions','name','pricing')) else []
     return []
 
 
@@ -132,7 +134,7 @@ def api_version():
     return {'version': APP_VERSION, 'features': ['4g-prepaid-postpaid','4g-recharge-rules','trio-packages']}
 
 @app.get('/')
-def home():return FileResponse(Path(__file__).parent/'static'/'index.html')
+def home():return FileResponse(Path(__file__).parent/'static'/'index.html', headers={'Cache-Control':'no-store, max-age=0'})
 
 
 # Search uses the actual Knowledge Hub collection schema rather than treating
