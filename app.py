@@ -60,6 +60,71 @@ def select_records(payload,key):
         return [data] if key not in ('fiber_los','slow_internet','tt_routing') else []
     return []
 
+
+# Guidance fields are extracted only when explicitly present in the source rule.
+# Unknown operational details are never generated.
+GUIDANCE_FIELDS = {
+    'steps': ('troubleshootingsteps', 'troubleshooting', 'steps', 'diagnosticsteps', 'resolutionsteps', 'procedure', 'actions', 'actionsteps', 'recommendations'),
+    'questions': ('questions', 'questionstoask', 'customerquestions', 'verificationquestions', 'diagnosticquestions'),
+    'routing': ('ttrouting', 'routing', 'routingteam', 'dispatchteam', 'department', 'assignedteam', 'escalation', 'escalationpath', 'ttcategory', 'ticketcategory'),
+}
+
+def normalized(name):
+    return re.sub(r'[^a-z0-9]', '', name.lower())
+
+def to_text(value):
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float, bool)):
+        return str(value)
+    if isinstance(value, list):
+        return ' '.join(to_text(x) for x in value)
+    if isinstance(value, dict):
+        return ' '.join(f'{k}: {to_text(v)}' for k, v in value.items())
+    return ''
+
+def matching_fields(record, field_names):
+    matches = []
+    def visit(node, depth=0):
+        if depth > 4 or not isinstance(node, dict):
+            return
+        for key, value in node.items():
+            if normalized(key) in field_names and value not in (None, '', [], {}):
+                matches.append(value)
+            elif isinstance(value, dict):
+                visit(value, depth + 1)
+    visit(record)
+    return matches
+
+def as_guidance_items(value):
+    if isinstance(value, list):
+        return [to_text(item).strip() for item in value if to_text(item).strip()][:15]
+    if isinstance(value, dict):
+        return [f'{k}: {to_text(v)}' for k, v in value.items() if to_text(v).strip()][:15]
+    if isinstance(value, str):
+        return [x.strip(' -•\t') for x in re.split(r'\n+|(?<=;)\s+', value) if x.strip(' -•\t')][:15]
+    return [to_text(value)] if to_text(value).strip() else []
+
+def format_guidance(record):
+    title_fields = matching_fields(record, ('title', 'name', 'rulename', 'faultname', 'issuename', 'rule', 'fault', 'category', 'faulttype', 'issue'))
+    id_fields = matching_fields(record, ('id', 'ruleid', 'code', 'rulecode'))
+    sections = {}
+    for kind, names in GUIDANCE_FIELDS.items():
+        items = []
+        for value in matching_fields(record, names):
+            items.extend(as_guidance_items(value))
+        sections[kind] = list(dict.fromkeys(items))[:15]
+    used = set(sum((list(names) for names in GUIDANCE_FIELDS.values()), []) + ['title','name','rulename','faultname','issuename','rule','fault','category','faulttype','issue','id','ruleid','code','rulecode'])
+    details = [{'label': k, 'value': v} for k, v in record.items() if normalized(k) not in used and v not in (None, '', [], {})][:20]
+    return {
+        'title': to_text(title_fields[0])[:150] if title_fields else 'Matched Knowledge Hub rule',
+        'rule_id': to_text(id_fields[0])[:100] if id_fields else None,
+        'steps': sections['steps'],
+        'questions': sections['questions'],
+        'routing': sections['routing'],
+        'details': details,
+    }
+
 @app.get('/')
 def home():return FileResponse(Path(__file__).parent/'static'/'index.html')
 
@@ -72,6 +137,6 @@ async def analyze(q:Query):
             response=await client.get(BASE+path,headers={'Accept':'application/json'})
             response.raise_for_status(); payload=response.json()
         matches=select_records(payload,key)
-        return {'issue':label,'category':key,'source':BASE+path,'status':'matched' if matches else 'no_match','records':matches,'message':'Matching knowledge records found.' if matches else 'No matching operational rule was found. Do not infer troubleshooting or TT routing.'}
+        return {'issue':label,'category':key,'source':BASE+path,'status':'matched' if matches else 'no_match','guidance':[format_guidance(record) for record in matches],'message':'Matching knowledge records found.' if matches else 'No matching operational rule was found. Do not infer troubleshooting or TT routing.'}
     except (httpx.HTTPError,ValueError) as exc:
-        return {'issue':label,'category':key,'source':BASE+path,'status':'unavailable','records':[],'message':'Knowledge Hub is unavailable. No operational advice can be verified.','error':type(exc).__name__}
+        return {'issue':label,'category':key,'source':BASE+path,'status':'unavailable','guidance':[],'message':'Knowledge Hub is unavailable. No operational advice can be verified.','error':type(exc).__name__}
