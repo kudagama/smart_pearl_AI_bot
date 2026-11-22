@@ -2,6 +2,10 @@ import unittest
 from app import classify, select_records, format_guidance, classify_intent, four_g_information, trio_packages
 
 class KnowledgeGuidanceTests(unittest.TestCase):
+    def test_generic_response_is_not_a_rule(self):
+        envelope = {'success': True, 'telemetry': {'databaseName': 'KNOWLEDGEHUB'}, 'collections': {'rules': []}}
+        self.assertEqual(select_records(envelope, 'general'), [])
+
     def test_4g_intent_variants(self):
         for term in ('4G', '4 g', 'four g', 'LTE', '4G postpaid plans'):
             self.assertEqual(classify_intent(term)[0], '4g')
