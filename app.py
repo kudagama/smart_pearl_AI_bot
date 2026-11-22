@@ -153,9 +153,11 @@ def list_of(value):
 
 def classify_intent(transcript):
     t = transcript.lower()
-    if re.search(r'\\b4\\s*g\\b|\\blte\\b|ෆෝජී|4ජී', t):
-        return '4g', '4G LTE Information'
-    if re.search(r'\\btrio\\b|\\bshine\\b|\\bvibe\\b',t) and re.search(r'price|cost|rent|package|plan|මිල|ගාස්තු',t):
+    # Check 4G before generic fault classification, including requests spoken
+    # as "four g", "4 g", "LTE", or Sinhala 4G references.
+    if re.search(r'4\\s*g|four\\s*g|\\blte\\b|4ජී|ෆෝජී', t, re.I):
+        return '4g', '4G LTE Services'
+    if re.search(r'\\btrio\\b|\\bshine\\b|\\bvibe\\b', t) and re.search(r'price|cost|rent|package|plan|මිල|ගාස්තු', t):
         return 'trio_packages', 'Trio Package Prices'
     return classify(transcript)
 
@@ -181,6 +183,84 @@ def four_g_information(payload):
         'required_fields': rule.get('validation_requirements',{}).get('required_fields',[]),
         'allowed_channels': rule.get('validation_requirements',{}).get('thresholds',{}).get('allowed_channels',[]),
     } for rule in records]
+
+# 4G package data must come from a distinct 4G/LTE collection.
+# Never identify Trio/fibre offers as 4G products.
+FOUR_G_COLLECTIONS = ('four_g','fourG','4g','lte','ltePackages',
+                      'fourGPackages','4gPackages','mobile4g','mobile4G',
+                      'mobileBroadband','mobile_broadband')
+
+def first_value(source, *names):
+    if not isinstance(source, dict):
+        return None
+    for name in names:
+        if source.get(name) is not None:
+            return source[name]
+    return None
+
+def package_kind(package):
+    text = ' '.join(str(x) for x in (
+        first_value(package,'type','planType','plan_type','category',
+                    'connectionType','billingType','subscriptionType') or '',
+        first_value(package,'name','packageName','title') or '')).lower()
+    if 'postpaid' in text or 'post-paid' in text:
+        return 'postpaid'
+    if 'prepaid' in text or 'pre-paid' in text:
+        return 'prepaid'
+    return 'unspecified'
+
+def four_g_packages(payload):
+    data = knowledge_data(payload)
+    sources = []
+    for key in FOUR_G_COLLECTIONS:
+        node = data.get(key)
+        if isinstance(node, list):
+            sources.extend(node)
+        elif isinstance(node, dict):
+            for subkey in ('packages','plans','prepaid','postpaid','dataPackages','data_plans'):
+                value = node.get(subkey)
+                if isinstance(value, list):
+                    for p in value:
+                        if isinstance(p, dict):
+                            entry = dict(p)
+                            if subkey in ('prepaid','postpaid'):
+                                entry.setdefault('type', subkey)
+                            sources.append(entry)
+            if not sources and ('name' in node or 'packageName' in node):
+                sources.append(node)
+    results, seen = [], set()
+    for p in sources:
+        if not isinstance(p, dict):
+            continue
+        price = first_value(p,'priceWithTaxLkr','price_with_tax_lkr',
+                            'monthlyRentalLkr','rentalLkr','priceLkr',
+                            'price','amountLkr','amount')
+        price_info = p.get('pricing',{})
+        if price is None and isinstance(price_info, dict):
+            price = first_value(price_info,'priceWithTaxLkr','monthlyRentalLkr',
+                                'basePriceWithoutTaxLkr','priceLkr','price')
+        if isinstance(price, dict):
+            price = first_value(price,'amount','value','lkr')
+        name = first_value(p,'name','packageName','planName','title')
+        if not name:
+            continue
+        kind = package_kind(p)
+        quota = first_value(p,'dataQuota','quota','quotaGb','dataGb','anytimeGb','anytimeQuotaGb','dataAllowance')
+        if quota is None and isinstance(p.get('broadband'),dict):
+            quota = p['broadband'].get('anytimeQuotaGb')
+        item = {
+            'name':str(name), 'type':kind, 'price_lkr':price,
+            'quota':quota,
+            'validity':first_value(p,'validity','validityDays','duration','validityPeriod'),
+            'description':first_value(p,'description','details','tagline'),
+            'features':first_value(p,'highlights','features','benefits') or [],
+            'tax_included':first_value(p,'taxIncluded','isTaxIncluded'),
+        }
+        key = (item['name'].lower(),kind)
+        if key not in seen:
+            seen.add(key)
+            results.append(item)
+    return results
 
 def trio_packages(payload):
     data = knowledge_data(payload)
@@ -213,13 +293,15 @@ async def analyze(q:Query):
             payload = response.json()
         if key == '4g':
             items = four_g_information(payload)
+            plans = four_g_packages(payload)
             return {
                 'issue':label,'category':key,'source':url,
-                'status':'matched' if items else 'no_match',
-                'four_g':items, 'pricing_available':False,
-                'message': ('Available 4G recharge rules are shown below. '
-                  '4G package prices are not present in this Knowledge Hub dataset.'
-                  if items else 'No 4G records were found. 4G prices cannot be verified.')
+                'status':'matched' if (items or plans) else 'no_match',
+                'four_g':items,'packages':plans,
+                'prepaid_packages':[p for p in plans if p['type']=='prepaid'],
+                'postpaid_packages':[p for p in plans if p['type']=='postpaid'],
+                'pricing_available':any(p['price_lkr'] is not None for p in plans),
+                'message':'4G service information from Smart Knowledge Hub. Prices are displayed only when supplied by the API.'
             }
         if key == 'trio_packages':
             items = trio_packages(payload)
@@ -231,7 +313,7 @@ async def analyze(q:Query):
             records = knowledge_data(payload).get('rules',[])
             matches = select_records({'rules': records},key)
         else:
-            matches = select_records(payload,key)
+            matches = select_records(knowledge_data(payload),key)
         return {'issue':label,'category':key,'source':url,
                 'status':'matched' if matches else 'no_match',
                 'guidance':[format_guidance(record) for record in matches if isinstance(record,dict)],
