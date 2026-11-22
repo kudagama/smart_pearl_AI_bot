@@ -10,6 +10,20 @@ class KnowledgeGuidanceTests(unittest.TestCase):
         for term in ('4G', '4 g', 'four g', 'LTE', '4G postpaid plans'):
             self.assertEqual(classify_intent(term)[0], '4g')
 
+    def test_dedicated_4g_endpoint_payload(self):
+        from app import four_g_packages
+        payload = {'success': True,
+          'prepaid': [{'name': 'HBB Anytime - 899','type':'prepaid','priceLkr':899,
+                       'dataQuota':'35 GB','validity':'30 Days','status':'Active'}],
+          'postpaid': [{'name':'HBB Anytime 50GB','type':'postpaid',
+                        'priceLkr':1593.15,'dataQuota':'50 GB','status':'Not specified'}]}
+        plans = four_g_packages(payload)
+        self.assertEqual(len(plans),2)
+        self.assertEqual(plans[0]['price_lkr'],899)
+        self.assertEqual(plans[0]['quota'],'35 GB')
+        self.assertEqual(plans[1]['type'],'postpaid')
+        self.assertEqual(plans[1]['price_lkr'],1593.15)
+
     def test_prepaid_postpaid_packages(self):
         from app import four_g_packages
         payload = {'collections': {'four_g': {
