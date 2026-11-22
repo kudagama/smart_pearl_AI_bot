@@ -128,15 +128,116 @@ def format_guidance(record):
 @app.get('/')
 def home():return FileResponse(Path(__file__).parent/'static'/'index.html')
 
+
+# Search uses the actual Knowledge Hub collection schema rather than treating
+# the whole API response (success, telemetry, metrics) as a knowledge record.
+def knowledge_data(payload):
+    if not isinstance(payload, dict):
+        return {}
+    for name in ('data', 'knowledgeHub', 'knowledge_hub'):
+        nested = payload.get(name)
+        if isinstance(nested, dict) and any(k in nested for k in ('collections', 'rules', 'trio')):
+            payload = nested
+            break
+    result = dict(payload)
+    if isinstance(payload.get('collections'), dict):
+        result.update(payload['collections'])
+    return result
+
+def list_of(value):
+    if isinstance(value, list):
+        return value
+    if isinstance(value, dict):
+        return list(value.values()) if value and all(isinstance(x, dict) for x in value.values()) else []
+    return []
+
+def classify_intent(transcript):
+    t = transcript.lower()
+    if re.search(r'\\b4\\s*g\\b|\\blte\\b|ෆෝජී|4ජී', t):
+        return '4g', '4G LTE Information'
+    if re.search(r'\\btrio\\b|\\bshine\\b|\\bvibe\\b',t) and re.search(r'price|cost|rent|package|plan|මිල|ගාස්තු',t):
+        return 'trio_packages', 'Trio Package Prices'
+    return classify(transcript)
+
+def four_g_rules(payload):
+    data = knowledge_data(payload)
+    return [
+        x for x in list_of(data.get('rules'))
+        if isinstance(x, dict) and
+        (re.search(r'4g|lte', ' '.join(map(str, [x.get('rule_code',''),x.get('rule_name',''),x.get('description','')])), re.I))
+        and x.get('is_active', True) is not False
+    ]
+
+def four_g_information(payload):
+    records = four_g_rules(payload)
+    return [{
+        'title': rule.get('rule_name','4G service rule'),
+        'rule_id': rule.get('rule_code'),
+        'description': rule.get('description'),
+        'symptoms': rule.get('symptom_patterns',[]),
+        'action_type': rule.get('action_type'),
+        'target_group': rule.get('target_group'),
+        'advice': rule.get('advice_instructions'),
+        'required_fields': rule.get('validation_requirements',{}).get('required_fields',[]),
+        'allowed_channels': rule.get('validation_requirements',{}).get('thresholds',{}).get('allowed_channels',[]),
+    } for rule in records]
+
+def trio_packages(payload):
+    data = knowledge_data(payload)
+    trio = data.get('trio',{})
+    if isinstance(trio, dict):
+        packages = list_of(trio.get('packages',[]))
+    else:
+        packages = []
+    return [{
+        'name': p.get('name'), 'discontinued': p.get('isDiscontinued',False),
+        'base_price_lkr': p.get('pricing',{}).get('basePriceWithoutTaxLkr'),
+        'tax_lkr': p.get('pricing',{}).get('totalTaxLkr'),
+        'total_price_lkr': p.get('pricing',{}).get('priceWithTaxLkr'),
+        'anytime_gb': p.get('broadband',{}).get('anytimeQuotaGb'),
+        'channels': p.get('peoTv',{}).get('channelCount'),
+        'highlights': p.get('highlights',[]),
+    } for p in packages if isinstance(p,dict)]
+
 @app.post('/api/analyze')
 async def analyze(q:Query):
-    key,label=classify(q.transcript)
-    path=endpoint(key)
+    key,label = classify_intent(q.transcript)
+    # All general 4G queries use full KB collection. No 4G pricing API is
+    # documented; never substitute Trio rates for 4G package prices.
+    path = '/api/knowledge-hub' if key in ('4g','trio_packages') else endpoint(key)
+    url = BASE + path
     try:
         async with httpx.AsyncClient(timeout=20,follow_redirects=False) as client:
-            response=await client.get(BASE+path,headers={'Accept':'application/json'})
-            response.raise_for_status(); payload=response.json()
-        matches=select_records(payload,key)
-        return {'issue':label,'category':key,'source':BASE+path,'status':'matched' if matches else 'no_match','guidance':[format_guidance(record) for record in matches],'message':'Matching knowledge records found.' if matches else 'No matching operational rule was found. Do not infer troubleshooting or TT routing.'}
+            response = await client.get(url,headers={'Accept':'application/json'})
+            response.raise_for_status()
+            payload = response.json()
+        if key == '4g':
+            items = four_g_information(payload)
+            return {
+                'issue':label,'category':key,'source':url,
+                'status':'matched' if items else 'no_match',
+                'four_g':items, 'pricing_available':False,
+                'message': ('Available 4G recharge rules are shown below. '
+                  '4G package prices are not present in this Knowledge Hub dataset.'
+                  if items else 'No 4G records were found. 4G prices cannot be verified.')
+            }
+        if key == 'trio_packages':
+            items = trio_packages(payload)
+            return {'issue':label,'category':key,'source':url,
+                    'status':'matched' if items else 'no_match','packages':items,
+                    'message':'Trio package prices from Knowledge Hub.' if items else 'No Trio prices available.'}
+        # A collection is not a rule. Unwrap before matching operational records.
+        if key in ('fiber_los','slow_internet','tt_routing'):
+            records = knowledge_data(payload).get('rules',[])
+            matches = select_records({'rules': records},key)
+        else:
+            matches = select_records(payload,key)
+        return {'issue':label,'category':key,'source':url,
+                'status':'matched' if matches else 'no_match',
+                'guidance':[format_guidance(record) for record in matches if isinstance(record,dict)],
+                'message':'Matching Knowledge Hub records found.' if matches else 'No matching operational record was found.'}
     except (httpx.HTTPError,ValueError) as exc:
-        return {'issue':label,'category':key,'source':BASE+path,'status':'unavailable','guidance':[],'message':'Knowledge Hub is unavailable. No operational advice can be verified.','error':type(exc).__name__}
+        return {'issue':label,'category':key,'source':url,'status':'unavailable',
+                'guidance':[], 'four_g':[], 'packages':[],
+                'message':'Knowledge Hub unavailable. No prices or instructions can be verified.',
+                'error':type(exc).__name__}
