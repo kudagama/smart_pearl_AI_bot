@@ -125,6 +125,12 @@ def format_guidance(record):
         'details': details,
     }
 
+APP_VERSION = "4g-dashboard-fix-20261122-b"
+
+@app.get('/api/version')
+def api_version():
+    return {'version': APP_VERSION, 'features': ['4g-prepaid-postpaid','4g-recharge-rules','trio-packages']}
+
 @app.get('/')
 def home():return FileResponse(Path(__file__).parent/'static'/'index.html')
 
@@ -155,9 +161,9 @@ def classify_intent(transcript):
     t = transcript.lower()
     # Check 4G before generic fault classification, including requests spoken
     # as "four g", "4 g", "LTE", or Sinhala 4G references.
-    if re.search(r'4\\s*g|four\\s*g|\\blte\\b|4ජී|ෆෝජී', t, re.I):
+    if re.search(r'4\s*g|four\s*g|\blte\b|4ජී|ෆෝජී', t, re.I):
         return '4g', '4G LTE Services'
-    if re.search(r'\\btrio\\b|\\bshine\\b|\\bvibe\\b', t) and re.search(r'price|cost|rent|package|plan|මිල|ගාස්තු', t):
+    if re.search(r'\btrio\b|\bshine\b|\bvibe\b', t) and re.search(r'price|cost|rent|package|plan|මිල|ගාස්තු', t):
         return 'trio_packages', 'Trio Package Prices'
     return classify(transcript)
 
